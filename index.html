@@ -624,7 +624,8 @@ const LS_TALLY_QUEUE='mg_tally_queue_'+CONTRACTOR_SLUG; /* per-cell offline queu
 const LS_TALLY_DEAD='mg_tally_dead_'+CONTRACTOR_SLUG; /* v4.6.3g — quarantined cells (permanent rejection). Replayed once on boot in case the server-side blocker (e.g. missing kind constraint) was since fixed. */
 const LS_TALLY_META_QUEUE='mg_tally_meta_queue_'+CONTRACTOR_SLUG; /* v4.6.4 — offline/failed mob metadata (type/desc) updates to existing count cells; flushed alongside the tally queue. */
 const ROLE_TIMEOUT_HOURS=12; /* auto-reset after 12h inactivity */
-const APP_VERSION='v4.6.72o';
+const APP_VERSION='v4.6.72p';
+/* v4.6.72p (16 Nov 2026): ONE PERSON, SEVERAL ROLES ON A JOB. Jamie (CJ) shears and pens the same day. crewDetails[id].extraRoles (optional) + 'Also works as' in Edit Job. The board, shed grid, ganger pick, summary and the shed-runs pay loop read any of the person's roles; shed runs are paid as the person's shed role (primary when it is one, else the first extra). pieceIds unchanged in effect (counts already paid to whoever has them). Stand fee stays primary-role only. Without extraRoles nothing changes: replay harness 0 pay differences across every job in the database. */
 /* v4.6.72o (30 Oct 2026): BROADCAST CAP IS A WARNING, NOT A LIMIT. Josh (Knights): 'I'm not concerned with the $2, I'd prefer the clear received message.' SMS is metered to the contractor, so the 2-text cap only ever protected their own money. Full-text mode still shows segments x people and the dollar figure before Send and flags a long message; it no longer refuses. The sheet remembers the last mode used on this phone. No other change. */
 /* v4.6.72n (29 Oct 2026): TEAM CHAT IN CREW VIEW. A VIEW-mode phone shows the crew overlay (G'day / My jobs / My tallies) on top of the home screen, and the Team chat bar sat underneath it - crew could not open the chat that the pointer broadcast sent them to (Woolaway, 29 Oct: contractor had to resend full text). The bar now sits under the greeting in the crew view. No other change. */
 /* v4.6.72m (28 Oct 2026): SAVE AUDIT FIXES. (1) Day notes no longer double: the note was treated as someone else's whenever updated_at strings differed, and the app's '...Z' never equalled PostgREST's '...+00:00', so any edit inside saved text prepended the whole saved note (Knights MARG-0028: 3 lines became 29). Identity is now the body this device last saw; genuine concurrent edits merge line-wise with no loss; one write per date at a time. (2) Broadcasts, pointers and job cards go once per phone number - a worker held as two or three crew records got every text two or three times. (3) Version watch: the app checks /version.json on resume and every 20 min; a different build reloads itself once from the home screen when idle, otherwise shows an 'Update ready' pill. A Knights iPhone ran a 2.5-day-old build through three fixes without it. sw.js v13 never caches version.json. (4) A whiteboard note that landed but timed out is no longer retried forever. No pay-engine, tally or job-blob change. */
@@ -2346,6 +2347,19 @@ const getJobRole=(job,id)=>{
   const c=gc(id);
   return c?c.role:null;
 };
+/* v4.6.72p — ONE PERSON, SEVERAL ROLES ON A JOB. crewDetails[id].extraRoles is an optional
+   list of further roles this person works on this job (Jamie: Shearer + Penner). getJobRole
+   stays the PRIMARY role (stand fee, defaults, history). jobRoles() is the full list; the
+   board, shed grid and shed-runs pay loop ask "any of these" instead of "the one". shedRoleOf()
+   is the role a person's shed runs are paid as: the primary when it is a shed-type role (as
+   today), otherwise the first extra shed role. Without extraRoles every answer is unchanged. */
+const EXTRA_ROLE_OPTS=['Shearer','Wool Handler','Wool Classer','Penner','Presser'];
+function jobExtraRoles(job,id){const det=((job?.rates?.crewDetails)||{})[id]||{};const x=det.extraRoles;return Array.isArray(x)?x.filter(r=>EXTRA_ROLE_OPTS.indexOf(r)>=0):[];}
+function jobRoles(job,id){const p=getJobRole(job,id);const x=jobExtraRoles(job,id).filter(r=>r!==p);return (p?[p]:[]).concat(x);}
+function hasJobRole(job,id,rs){const want=Array.isArray(rs)?rs:[rs];return jobRoles(job,id).some(r=>want.indexOf(r)>=0);}
+function shedRoleOf(job,id){const p=getJobRole(job,id);if(p&&p!=='Shearer'&&p!=='Crutcher'&&p!=='Cook')return p;const x=jobExtraRoles(job,id).find(r=>SHED_ROLES.indexOf(r)>=0);return x||null;}
+function shedIdsOf(job){return (job.crew||[]).filter(id=>!!shedRoleOf(job,id));}
+function jobRoleLabel(job,id){const rs=jobRoles(job,id);return rs.length?rs.join(' + '):null;}
 
 /* ══ v4.6.18 — MID-SHED ROLE CHANGE ══════════════════════════════════════════
    A shed hand can change role mid-shed: classer for two runs then presser, or a
@@ -2566,8 +2580,7 @@ function hasPieceCounts(job,id){
 }
 function pieceIds(job){
   return (job.crew||[]).filter(id=>{
-    const r=getJobRole(job,id);
-    return r==='Shearer'||r==='Crutcher'||hasPieceCounts(job,id);
+    return hasJobRole(job,id,['Shearer','Crutcher'])||hasPieceCounts(job,id); /* v4.6.72p - any of the person's roles */
   });
 }
 /* Stand fee stays strictly role-based. It is equipment hire for a shearer who
@@ -3186,7 +3199,7 @@ const pad=(str,len)=>String(str).padEnd(len,' ');
 function generateFarmRecord(job){
   const farm=gf(job.farmId);
   const shIds=pieceIds(job); /* v4.6.18 — data-driven: counts are paid to whoever entered them */
-  const shedIds=job.crew.filter(id=>{const r=getJobRole(job,id);return r&&r!=='Shearer'&&r!=='Crutcher'&&r!=='Cook';});
+  const shedIds=shedIdsOf(job); /* v4.6.72p */
   const dash='\u2500'.repeat(56);
   const dashEq='\u2550'.repeat(56);
   /* Group mobs by type+desc across entire job */
@@ -3310,7 +3323,7 @@ function generateFarmRecord(job){
 function generateSummary(job,period){
   const farm=gf(job.farmId);const rates=job.rates||{};
   const shIds=pieceIds(job); /* v4.6.18 — data-driven: counts are paid to whoever entered them */
-  const shedIds=job.crew.filter(id=>{const r=getJobRole(job,id);return r&&r!=='Shearer'&&r!=='Crutcher'&&r!=='Cook';});
+  const shedIds=shedIdsOf(job); /* v4.6.72p */
   const dash='\u2500'.repeat(52);
   const inP=date=>!period||(date>=period.start&&date<=period.end);
   const shornBy={};shIds.forEach(id=>{shornBy[id]={sh:0,shEarn:0,cr:0,crEarn:0,mobs:[],daysSet:{}};});
@@ -3744,7 +3757,7 @@ function payWeekJobData(job,period){
   const out={};
   const W=id=>{if(!out[id]){const c=gc(id);out[id]={id,name:c?c.name:'Unknown',role:getJobRole(job,id)||(c?c.role:'')||'',lines:[],piece:0,teamLoad:0,staffEarn:0,travel:0,stand:0,standSuper:0,tax:0,mess:0,sundries:0,hasTeam:false};}return out[id];};
   const shIds=pieceIds(job); /* v4.6.18 — data-driven: counts are paid to whoever entered them */
-  const stIds=job.crew.filter(id=>{const r=getJobRole(job,id);return r&&r!=='Shearer'&&r!=='Crutcher'&&r!=='Cook';});
+  const stIds=shedIdsOf(job); /* v4.6.72p - anyone with a shed-type role among their roles */
   const dEt=id=>((rates.crewDetails||{})[id])||{};
   /* piecework: per date x type x effective rate (overrides + individual loadings baked in) */
   const agg={};const daysSet={};
@@ -3768,7 +3781,7 @@ function payWeekJobData(job,period){
     if(lt==='team'&&base>0&&teamTotal>0){const earn=base*teamTotal;const w=W(id);w.teamLoad+=earn;w.hasTeam=true;
       w.lines.push({date:'',shed,item:'Team loading '+teamTotal.toLocaleString()+' head',units:teamTotal,rate:base,amount:earn,superable:true});}});
   /* shed staff per day - role rate + per-person override; presser day rules (threshold / cpk, union of dates) */
-  stIds.forEach(id=>{const role=getJobRole(job,id);const d=dEt(id);
+  stIds.forEach(id=>{const role=shedRoleOf(job,id);const d=dEt(id); /* v4.6.72p - the role their runs are paid as */
     const ov=(rates.crewOverrides||{})[id];
     const defR=role==='Wool Classer'?rates.classerPerRun:role==='Penner'?rates.pennerPerRun:role==='Presser'?rates.presserPerRun:rates.woolHandlerPerRun;
     /* v4.6.66 — through the one resolver, so a per-role override applies here
@@ -4123,7 +4136,7 @@ function generateTallyTrends(jobs,endPeriod,fq,weeksN){
   (jobs||[]).forEach(job=>{
     if(!job||!job.crew)return;
     const shIds=pieceIds(job); /* v4.6.18 — data-driven: counts are paid to whoever entered them */
-    const stIds=job.crew.filter(id=>{const r=getJobRole(job,id);return r&&r!=='Shearer'&&r!=='Crutcher'&&r!=='Cook';});
+    const stIds=shedIdsOf(job); /* v4.6.72p */
     periods.forEach((p,pi)=>{
       const inP=d=>d>=p.start&&d<=p.end;
       Object.entries(job.runs||{}).forEach(([date,rs])=>{if(!inP(date))return;(rs||[]).forEach(run=>{mobsOf(run).forEach(mob=>{
@@ -4933,7 +4946,7 @@ function TallyTab({job,setJob,role,viewDate,setViewDate}){
   const todayStr=localToday();
   const dates=jobDates(job);
   const dayRuns=(job.runs||{})[viewDate]||[];
-  const shearers=job.crew.filter(id=>{const r=getJobRole(job,id);return r==='Shearer'||r==='Crutcher';});
+  const shearers=job.crew.filter(id=>hasJobRole(job,id,['Shearer','Crutcher'])); /* v4.6.72p */
   /* STAND ORDER — persisted per-job. New shearers added later appear at end of the order. */
   const savedOrder=Array.isArray(job.shearerOrder)?job.shearerOrder:[];
   const orderedFromSaved=savedOrder.filter(id=>shearers.includes(id));
@@ -4942,8 +4955,8 @@ function TallyTab({job,setJob,role,viewDate,setViewDate}){
   const [reorderMode,setReorderMode]=useState(false);
   const [confirmDelRun,setConfirmDelRun]=useState(null); /* run id awaiting delete confirmation */
   const [shOv,setShOv]=useState(null); /* v4.6.72f - {id,mobId} shearer override sheet */
-  const shedStaff=job.crew.filter(id=>{const r=getJobRole(job,id);return r==='Wool Handler'||r==='Wool Classer'||r==='Penner';});
-  const pressers=job.crew.filter(id=>(getJobRole(job,id)||gc(id)?.role)==='Presser');
+  const shedStaff=job.crew.filter(id=>hasJobRole(job,id,['Wool Handler','Wool Classer','Penner'])); /* v4.6.72p */
+  const pressers=job.crew.filter(id=>hasJobRole(job,id,'Presser')||(!getJobRole(job,id)&&gc(id)?.role==='Presser'));
   const rates=job.rates||{};
   const mobRunTot=mob=>shearers.reduce((s,id)=>s+(mob.counts[id]||0),0);
   const runTot=run=>mobsOf(run).reduce((s,mob)=>s+mobRunTot(mob),0);
@@ -5118,7 +5131,7 @@ const flushMobDesc=(mid,v)=>{
        runs read back as their own role and price at the wrong rate — a wool
        handler covering the penner was paid $80 instead of $85. */
     const liveRoles=Object.keys(live);
-    const isSplit=liveRoles.length>1||(liveRoles.length===1&&liveRoles[0]!==getJobRole(job,cid));
+    const isSplit=liveRoles.length>1||(liveRoles.length===1&&liveRoles[0]!==shedRoleOf(job,cid)); /* v4.6.72p */
     setJob(prev=>{
       const nextRole={...(prev.shedRoleRuns||{})};
       const forCid={...(nextRole[cid]||{})};
@@ -5298,7 +5311,7 @@ const flushMobDesc=(mid,v)=>{
   const hasCrutch=Object.values(job.runs||{}).flat().some(run=>mobsOf(run).some(m=>m.type==='Crutching'));
   const stats=shearerStats(job,viewDate,shearers);
   const mts=mobTotals(job,viewDate,shearers);
-  const roleGroups=[{lbl:'WOOL HANDLER',ids:shedStaff.filter(id=>(getJobRole(job,id)||gc(id)?.role)==='Wool Handler')},{lbl:'CLASSER',ids:shedStaff.filter(id=>(getJobRole(job,id)||gc(id)?.role)==='Wool Classer')},{lbl:'PENNER',ids:shedStaff.filter(id=>(getJobRole(job,id)||gc(id)?.role)==='Penner')}].filter(g=>g.ids.length>0);
+  const roleGroups=[{lbl:'WOOL HANDLER',ids:shedStaff.filter(id=>(shedRoleOf(job,id)||gc(id)?.role)==='Wool Handler')},{lbl:'CLASSER',ids:shedStaff.filter(id=>(shedRoleOf(job,id)||gc(id)?.role)==='Wool Classer')},{lbl:'PENNER',ids:shedStaff.filter(id=>(shedRoleOf(job,id)||gc(id)?.role)==='Penner')}].filter(g=>g.ids.length>0); /* v4.6.72p */
 
   return e('div',null,
     shOv&&e(ShearerOverrideSheet,{job,setJob,role,id:shOv.id,mobId:shOv.mobId,date:viewDate,onClose:()=>setShOv(null)}), /* v4.6.72f */
@@ -5336,7 +5349,7 @@ const flushMobDesc=(mid,v)=>{
     (function(){
       const gr=(job.rates||{}).gangerRate||{};
       if(!(Number(gr.Shearing)||Number(gr.Crutching)))return null;
-      const eligible=(job.crew||[]).filter(id=>{const r=getJobRole(job,id);return r==='Shearer'||r==='Crutcher';});
+      const eligible=(job.crew||[]).filter(id=>hasJobRole(job,id,['Shearer','Crutcher'])); /* v4.6.72p */
       if(!eligible.length)return null;
       const explicit=((job.rates||{}).gangerByDate||{})[viewDate];
       const cur=gangerOn(job,viewDate);
@@ -5488,7 +5501,7 @@ const flushMobDesc=(mid,v)=>{
                 border:'1px solid var(--border)',background:split?'var(--amberD)':'var(--card2)',
                 color:split?'var(--amber)':'var(--dim)',cursor:'pointer'}},
               split?('Split \u00b7 '+splitTxt):'Split roles'),
-            splitFor===id&&e(ShedSplitEditor,{crewId:id,jobRole:getJobRole(job,id),
+            splitFor===id&&e(ShedSplitEditor,{crewId:id,jobRole:shedRoleOf(job,id),
               current:sp,dayTotal:runs,
               onSave:byRole=>{setShedSplit(id,byRole);setSplitFor(null);},
               onCancel:()=>setSplitFor(null)})
@@ -5578,7 +5591,7 @@ const flushMobDesc=(mid,v)=>{
           e(Av,{name:c.name,size:32}),
           e('div',{className:'staff-info'},
             e('div',{className:'staff-name'},c.name),
-            e('div',{className:'staff-rate-lbl'},(getJobRole(job,id)||c.role)+(isAdmin&&perDayAmt?' · '+rateLbl:''))
+            e('div',{className:'staff-rate-lbl'},(jobRoleLabel(job,id)||c.role)+(isAdmin&&perDayAmt?' · '+rateLbl:''))
           ),
           e('div',{className:'staff-stats'},
             e('div',{className:'s-grp'},e('div',{className:'s-lbl'},tMode==='km'?'Drove':'Travel'),
@@ -5675,7 +5688,7 @@ const flushMobDesc=(mid,v)=>{
           e(Av,{name:c.name,size:32}),
           e('div',{className:'staff-info'},
             e('div',{className:'staff-name'},c.name),
-            e('div',{className:'staff-rate-lbl'},(getJobRole(job,id)||c.role)+(isAdmin?' \u00b7 $'+rate.toFixed(2)+'/day':''))
+            e('div',{className:'staff-rate-lbl'},(jobRoleLabel(job,id)||c.role)+(isAdmin?' \u00b7 $'+rate.toFixed(2)+'/day':''))
           ),
           e('div',{className:'staff-stats'},
             e('div',{className:'s-grp'},e('div',{className:'s-lbl'},'Mess'),
@@ -5879,7 +5892,7 @@ function SummaryTab({job,setJob,role}){
   const prevStart=period?addDays(period.start,-periodLen):null;
   const nextStart=period?addDays(period.start,periodLen):null;
   const btnLabel=d=>{const [,mo,dy]=d.split('-').map(Number);const dt=new Date(d.split('-')[0],mo-1,dy);const dn=['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];return dn[dt.getDay()]+' '+String(dy).padStart(2,'0')+'/'+String(mo).padStart(2,'0');};
-  const shIds=job.crew.filter(id=>{const r=getJobRole(job,id);return r==='Shearer'||r==='Crutcher';});
+  const shIds=job.crew.filter(id=>hasJobRole(job,id,['Shearer','Crutcher'])); /* v4.6.72p */
   const totalJobShorn=Object.values(job.runs||{}).flat().flatMap(r=>mobsOf(r)).reduce((s,mob)=>s+shIds.reduce((a,id)=>a+(mob.counts[id]||0),0),0);
 
   return e('div',{className:'summary-wrap'},
@@ -6110,9 +6123,9 @@ function AdminTab({job,setJob,onEdit,onDeleteFarm,onDeleteJob,onPublish}){
     setSaved(true);setTimeout(()=>setSaved(false),2000);
   };
 
-  const shearers=job.crew.filter(id=>{const r=getJobRole(job,id);return r==='Shearer'||r==='Crutcher';});
+  const shearers=job.crew.filter(id=>hasJobRole(job,id,['Shearer','Crutcher'])); /* v4.6.72p */
   const loadingCrew=shearers; /* shearers + crutchers get $/head loadings — already included in `shearers` */
-  const shedStaff=job.crew.filter(id=>{const r=getJobRole(job,id);return r&&r!=='Shearer'&&r!=='Crutcher'&&r!=='Cook';});
+  const shedStaff=shedIdsOf(job); /* v4.6.72p */
   const DAY_FULL_=['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'];
 
   return e('div',{className:'admin-wrap'},
@@ -6215,7 +6228,7 @@ function AdminTab({job,setJob,onEdit,onDeleteFarm,onDeleteJob,onPublish}){
       e('div',{className:'admin-sec-hdr'},e('div',{className:'admin-sec-title'},'Per Person Rate Overrides'),e('div',{className:'admin-sec-sub'},'Override $/run per person. Someone who works two roles can have a rate for each \u2014 tap By role.')),
       shedStaff.map(id=>{
         const c=gc(id);if(!c)return null;
-        const role=getJobRole(job,id);
+        const role=shedRoleOf(job,id); /* v4.6.72p */
         const cur=(draft.crewOverrides||{})[id]??'';
         const defR=role==='Wool Classer'?draft.classerPerRun:role==='Penner'?draft.pennerPerRun:role==='Presser'?draft.presserPerRun:draft.woolHandlerPerRun;
         /* v4.6.66 — roles this person has actually worked on the job, so the
@@ -8162,6 +8175,8 @@ function EditJobScreen({job,onSave,onClose,farmList,addFarm,crewList,addCrew}){
   const [selCrew,setSelCrew]=useState(job.crew||[]);
   const [submitErr,setSubmitErr]=useState('');
   const [roleSync,setRoleSync]=useState([]); /* v4.6.72l - ids whose job role is to be refreshed from the record on save */
+  const [extraRoles,setExtraRoles]=useState(()=>{const o={};Object.entries(((job.rates||{}).crewDetails)||{}).forEach(([id,d])=>{if(d&&Array.isArray(d.extraRoles)&&d.extraRoles.length)o[id]=d.extraRoles.slice();});return o;}); /* v4.6.72p - also works as */
+  const togExtra=(id,r)=>setExtraRoles(p=>{const cur=p[id]||[];const next=cur.indexOf(r)>=0?cur.filter(x=>x!==r):cur.concat([r]);const o={...p};if(next.length)o[id]=next;else delete o[id];return o;});
 
   const rJobName=useRef(),rStartDate=useRef(),rDays=useRef(),rSheep=useRef();
   const rAccomm=useRef(),rNotes=useRef(),rJobPin=useRef();
@@ -8194,6 +8209,13 @@ function EditJobScreen({job,onSave,onClose,farmList,addFarm,crewList,addCrew}){
         if(wasOn(id)&&existingDetails[id]&&existingDetails[id].role&&existingDetails[id].role!==c.role)
           logJobEvent(job.id,'crew_role_changed',(c.name||id)+': '+existingDetails[id].role+' \u2192 '+c.role+' (updated in Edit Job)','admin');
       }
+    });
+    /* v4.6.72p - extra roles: kept only for people still on the job, never equal to the primary */
+    selCrew.forEach(id=>{
+      const prim=(newDetails[id]||{}).role;
+      const x=(extraRoles[id]||[]).filter(r=>r!==prim&&EXTRA_ROLE_OPTS.indexOf(r)>=0);
+      if(x.length)newDetails[id]={...(newDetails[id]||{}),extraRoles:x};
+      else if(newDetails[id]&&newDetails[id].extraRoles){const nd={...newDetails[id]};delete nd.extraRoles;newDetails[id]=nd;}
     });
     onSave({
       ...job,
@@ -8318,6 +8340,15 @@ function EditJobScreen({job,onSave,onClose,farmList,addFarm,crewList,addCrew}){
               e('button',{type:'button',onClick:()=>setRoleSync(p=>p.concat([c.id])),style:{background:'var(--amber)',color:'#1e2a3a',border:0,borderRadius:7,padding:'6px 10px',fontWeight:800,fontSize:12,cursor:'pointer',whiteSpace:'nowrap'}},'Update to '+c.role))),
             e('div',{style:{fontSize:11,color:'var(--muted)',marginTop:4}},'Only this job changes, from today. Finished jobs keep the role they were paid at.')),
           roleSync.length>0&&e('div',{style:{margin:'4px 0',fontSize:12,color:'var(--green,#22c55e)',fontWeight:600}},'\u2713 '+roleSync.length+' role'+(roleSync.length===1?'':'s')+' will update when you save.'),
+          /* v4.6.72p - ALSO WORKS AS: a second (or third) role on this job for one record */
+          selCrew.length>0&&e('div',{style:{margin:'10px 0 4px'}},
+            e('div',{className:'crew-group-lbl'},'Also works as'),
+            e('div',{style:{fontSize:11.5,color:'var(--muted)',margin:'0 0 6px'}},'For someone doing two jobs on this shed \u2014 a shearer who also pens up, a wool handler who presses. They appear on both grids and get one pay line per role. Leave blank for everyone else.'),
+            selCrew.map(id=>{const c=crewList.find(cr=>cr.id===id);if(!c)return null;const prim=effRole(c);const mine=extraRoles[id]||[];
+              return e('div',{key:id,style:{display:'flex',alignItems:'center',gap:6,flexWrap:'wrap',padding:'4px 0',borderBottom:'1px solid var(--border)'}},
+                e('span',{style:{fontSize:13,minWidth:120}},c.name,e('span',{style:{color:'var(--muted)'}},' \u00b7 '+prim)),
+                EXTRA_ROLE_OPTS.filter(r=>r!==prim).map(r=>e('button',{key:r,type:'button',onClick:()=>togExtra(id,r),
+                  className:'chip'+(mine.indexOf(r)>=0?' sel':''),style:{fontSize:11,padding:'3px 8px'}},'+ '+r)));})),
           !showAddCrew&&e('button',{className:'add-inline-btn',onClick:()=>setShowAddCrew(true)},'+ Add New Crew Member'),
           showAddCrew&&e(AddCrewForm,{key:'add-crew',onAdd:handleAddCrew,onCancel:()=>setShowAddCrew(false)})
         )
