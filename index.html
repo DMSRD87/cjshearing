@@ -624,7 +624,8 @@ const LS_TALLY_QUEUE='mg_tally_queue_'+CONTRACTOR_SLUG; /* per-cell offline queu
 const LS_TALLY_DEAD='mg_tally_dead_'+CONTRACTOR_SLUG; /* v4.6.3g — quarantined cells (permanent rejection). Replayed once on boot in case the server-side blocker (e.g. missing kind constraint) was since fixed. */
 const LS_TALLY_META_QUEUE='mg_tally_meta_queue_'+CONTRACTOR_SLUG; /* v4.6.4 — offline/failed mob metadata (type/desc) updates to existing count cells; flushed alongside the tally queue. */
 const ROLE_TIMEOUT_HOURS=12; /* auto-reset after 12h inactivity */
-const APP_VERSION='v4.6.72p';
+const APP_VERSION='v4.6.72q';
+/* v4.6.72q (16 Nov 2026): 'Also works as' is a one-line picker - rows only for people with a second role, '+ Add a second role' opens Who / Also as. No change to data, save or pay. */
 /* v4.6.72p (16 Nov 2026): ONE PERSON, SEVERAL ROLES ON A JOB. Jamie (CJ) shears and pens the same day. crewDetails[id].extraRoles (optional) + 'Also works as' in Edit Job. The board, shed grid, ganger pick, summary and the shed-runs pay loop read any of the person's roles; shed runs are paid as the person's shed role (primary when it is one, else the first extra). pieceIds unchanged in effect (counts already paid to whoever has them). Stand fee stays primary-role only. Without extraRoles nothing changes: replay harness 0 pay differences across every job in the database. */
 /* v4.6.72o (30 Oct 2026): BROADCAST CAP IS A WARNING, NOT A LIMIT. Josh (Knights): 'I'm not concerned with the $2, I'd prefer the clear received message.' SMS is metered to the contractor, so the 2-text cap only ever protected their own money. Full-text mode still shows segments x people and the dollar figure before Send and flags a long message; it no longer refuses. The sheet remembers the last mode used on this phone. No other change. */
 /* v4.6.72n (29 Oct 2026): TEAM CHAT IN CREW VIEW. A VIEW-mode phone shows the crew overlay (G'day / My jobs / My tallies) on top of the home screen, and the Team chat bar sat underneath it - crew could not open the chat that the pointer broadcast sent them to (Woolaway, 29 Oct: contractor had to resend full text). The bar now sits under the greeting in the crew view. No other change. */
@@ -8176,6 +8177,7 @@ function EditJobScreen({job,onSave,onClose,farmList,addFarm,crewList,addCrew}){
   const [submitErr,setSubmitErr]=useState('');
   const [roleSync,setRoleSync]=useState([]); /* v4.6.72l - ids whose job role is to be refreshed from the record on save */
   const [extraRoles,setExtraRoles]=useState(()=>{const o={};Object.entries(((job.rates||{}).crewDetails)||{}).forEach(([id,d])=>{if(d&&Array.isArray(d.extraRoles)&&d.extraRoles.length)o[id]=d.extraRoles.slice();});return o;}); /* v4.6.72p - also works as */
+  const [addExtra,setAddExtra]=useState(null); /* v4.6.72q - {id,role} while the picker is open */
   const togExtra=(id,r)=>setExtraRoles(p=>{const cur=p[id]||[];const next=cur.indexOf(r)>=0?cur.filter(x=>x!==r):cur.concat([r]);const o={...p};if(next.length)o[id]=next;else delete o[id];return o;});
 
   const rJobName=useRef(),rStartDate=useRef(),rDays=useRef(),rSheep=useRef();
@@ -8340,15 +8342,22 @@ function EditJobScreen({job,onSave,onClose,farmList,addFarm,crewList,addCrew}){
               e('button',{type:'button',onClick:()=>setRoleSync(p=>p.concat([c.id])),style:{background:'var(--amber)',color:'#1e2a3a',border:0,borderRadius:7,padding:'6px 10px',fontWeight:800,fontSize:12,cursor:'pointer',whiteSpace:'nowrap'}},'Update to '+c.role))),
             e('div',{style:{fontSize:11,color:'var(--muted)',marginTop:4}},'Only this job changes, from today. Finished jobs keep the role they were paid at.')),
           roleSync.length>0&&e('div',{style:{margin:'4px 0',fontSize:12,color:'var(--green,#22c55e)',fontWeight:600}},'\u2713 '+roleSync.length+' role'+(roleSync.length===1?'':'s')+' will update when you save.'),
-          /* v4.6.72p - ALSO WORKS AS: a second (or third) role on this job for one record */
+          /* v4.6.72q - ALSO WORKS AS: only people who have a second role are listed; one button adds one */
           selCrew.length>0&&e('div',{style:{margin:'10px 0 4px'}},
             e('div',{className:'crew-group-lbl'},'Also works as'),
-            e('div',{style:{fontSize:11.5,color:'var(--muted)',margin:'0 0 6px'}},'For someone doing two jobs on this shed \u2014 a shearer who also pens up, a wool handler who presses. They appear on both grids and get one pay line per role. Leave blank for everyone else.'),
-            selCrew.map(id=>{const c=crewList.find(cr=>cr.id===id);if(!c)return null;const prim=effRole(c);const mine=extraRoles[id]||[];
-              return e('div',{key:id,style:{display:'flex',alignItems:'center',gap:6,flexWrap:'wrap',padding:'4px 0',borderBottom:'1px solid var(--border)'}},
-                e('span',{style:{fontSize:13,minWidth:120}},c.name,e('span',{style:{color:'var(--muted)'}},' \u00b7 '+prim)),
-                EXTRA_ROLE_OPTS.filter(r=>r!==prim).map(r=>e('button',{key:r,type:'button',onClick:()=>togExtra(id,r),
-                  className:'chip'+(mine.indexOf(r)>=0?' sel':''),style:{fontSize:11,padding:'3px 8px'}},'+ '+r)));})),
+            Object.keys(extraRoles).filter(id=>selCrew.indexOf(id)>=0).map(id=>{const c=crewList.find(cr=>cr.id===id);if(!c)return null;const prim=effRole(c);const mine=(extraRoles[id]||[]).filter(r=>r!==prim);if(!mine.length)return null;
+              return e('div',{key:id,style:{display:'flex',alignItems:'center',gap:8,padding:'6px 0',borderBottom:'1px solid var(--border)',fontSize:13}},
+                e('span',{style:{flex:1}},c.name,e('span',{style:{color:'var(--muted)'}},' \u00b7 '+prim),e('span',{style:{color:'var(--amber)',fontWeight:600}},' + '+mine.join(' + '))),
+                e('button',{type:'button',onClick:()=>setExtraRoles(p=>{const o={...p};delete o[id];return o;}),style:{background:'none',border:'none',color:'var(--muted)',fontSize:16,padding:'0 6px'},'aria-label':'Remove second role'},'\u2715'));}),
+            addExtra?e('div',{style:{display:'flex',gap:6,alignItems:'center',flexWrap:'wrap',marginTop:6}},
+                e('select',{className:'if-sel',style:{flex:1,minWidth:120},value:addExtra.id,onChange:ev=>setAddExtra(a=>({...a,id:ev.target.value}))},
+                  e('option',{value:''},'Who\u2026'),selCrew.map(id=>{const c=crewList.find(cr=>cr.id===id);return c?e('option',{key:id,value:id},c.name+' \u00b7 '+effRole(c)):null;})),
+                e('select',{className:'if-sel',style:{flex:1,minWidth:120},value:addExtra.role,onChange:ev=>setAddExtra(a=>({...a,role:ev.target.value}))},
+                  e('option',{value:''},'Also as\u2026'),EXTRA_ROLE_OPTS.filter(r=>{const c=crewList.find(cr=>cr.id===addExtra.id);return !c||r!==effRole(c);}).map(r=>e('option',{key:r,value:r},r))),
+                e('button',{type:'button',className:'chip'+(addExtra.id&&addExtra.role?' sel':''),disabled:!(addExtra.id&&addExtra.role),onClick:()=>{togExtra(addExtra.id,addExtra.role);setAddExtra(null);}},'Add'),
+                e('button',{type:'button',className:'chip',onClick:()=>setAddExtra(null)},'Cancel'))
+              :e('button',{type:'button',className:'chip',style:{marginTop:6},onClick:()=>setAddExtra({id:'',role:''})},'+ Add a second role'),
+            e('div',{style:{fontSize:11,color:'var(--muted)',marginTop:4}},'For someone doing two jobs on this shed \u2014 a shearer who also pens up. They appear on both grids and get one pay line per role.')),
           !showAddCrew&&e('button',{className:'add-inline-btn',onClick:()=>setShowAddCrew(true)},'+ Add New Crew Member'),
           showAddCrew&&e(AddCrewForm,{key:'add-crew',onAdd:handleAddCrew,onCancel:()=>setShowAddCrew(false)})
         )
